@@ -24,12 +24,14 @@ app.get("/catalog", async (req, res) => {
       subcategory = "",
       limit = "30",
       sortType = "0", // 0=Relevance 1=Favorited 2=Sales 3=Updated 4=PriceAsc 5=PriceDesc
+      cursor = "",
     } = req.query;
 
     const params = new URLSearchParams();
     params.set("Category", category);
     if (subcategory) params.set("Subcategory", subcategory);
     if (keyword) params.set("Keyword", keyword);
+    if (cursor) params.set("Cursor", cursor);
 
     // CreatorType i CreatorTargetId muszą iść razem
     if (creatorId && creatorType) {
