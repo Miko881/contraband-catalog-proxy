@@ -25,23 +25,30 @@ app.get("/catalog", async (req, res) => {
     const {
       keyword = "",
       creatorId = "0",
-      creatorType = "2", // 1 = User, 2 = Group
+      creatorType = "2", // 1 = User, 2 = Group (numeracja po stronie gry Roblox)
       limit = "30",
     } = req.query;
 
+    // Roblox akceptuje TYLKO 10, 28 albo 30 jako Limit - nic innego
+    const allowedLimits = ["10", "28", "30"];
+    const safeLimit = allowedLimits.includes(String(limit)) ? String(limit) : "30";
+
+    // Category=11 = Accessories (2 to bylo "Collectibles" - stad blad 400)
     let url =
-      "https://catalog.roblox.com/v1/search/items/details?Category=2&SortType=3&Limit=" +
-      encodeURIComponent(limit);
+      "https://catalog.roblox.com/v1/search/items/details?Category=11&SortType=0&Limit=" +
+      safeLimit;
 
     if (keyword) {
       url += "&Keyword=" + encodeURIComponent(keyword);
     }
     if (creatorId && creatorId !== "0") {
+      // Roblox oczekuje tekstu "User"/"Group", nie liczby
+      const creatorTypeStr = String(creatorType) === "1" ? "User" : "Group";
       url +=
         "&CreatorTargetId=" +
         encodeURIComponent(creatorId) +
         "&CreatorType=" +
-        encodeURIComponent(creatorType);
+        creatorTypeStr;
     }
 
     const response = await fetch(url, {
