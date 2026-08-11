@@ -1,84 +1,97 @@
-// ============================================================
 // Contraband Catalog Proxy
-// ============================================================
-// Prosty serwer pośredniczący między Twoją grą Roblox a katalogiem
-// Roblox. Roblox blokuje HttpService z gry do domen *.roblox.com,
-// więc ten serwer (hostowany GDZIE INDZIEJ, nie na Roblox) robi to
-// zapytanie za Ciebie i zwraca dane w prostym formacie JSON.
-//
-// URUCHOMIENIE LOKALNE (do testów):
-//   npm install
-//   npm start
-//   -> serwer wystartuje na http://localhost:3000
-//
-// WDROŻENIE (żeby Roblox mógł się z nim połączyć z internetu):
-//   Patrz plik DEPLOY.md w tym folderze.
-// ============================================================
+// Pośredniczy między grą Roblox a katalogiem Roblox (catalog.roblox.com),
+// żeby ominąć blokadę HttpService na domeny *.roblox.com z poziomu gry.
 
 const express = require("express");
 const app = express();
+const PORT = process.env.PORT || 10000;
 
-const PORT = process.env.PORT || 3000;
+// Dozwolone wartości wg oficjalnej dokumentacji Roblox
+// https://create.roblox.com/docs/projects/assets/api
+const VALID_LIMITS = new Set([10, 28, 30]);
+
+// Category (byte): 0=Featured 1=All 2=Collectibles 3=Clothing 4=BodyParts
+//                  5=Gear 11=Accessories 12=AvatarAnimations 13=CommunityCreations
+const DEFAULT_CATEGORY = 11; // Accessories — to było źródłem błędu 400 (wcześniej 2 = Collectibles)
 
 app.get("/catalog", async (req, res) => {
   try {
     const {
       keyword = "",
-      creatorId = "0",
-      creatorType = "2", // 1 = User, 2 = Group (numeracja po stronie gry Roblox)
+      creatorId = "",
+      creatorType = "", // 1 = User, 2 = Group
+      category = String(DEFAULT_CATEGORY),
+      subcategory = "",
       limit = "30",
+      sortType = "0", // 0=Relevance 1=Favorited 2=Sales 3=Updated 4=PriceAsc 5=PriceDesc
     } = req.query;
 
-    // Roblox akceptuje TYLKO 10, 28 albo 30 jako Limit - nic innego
-    const allowedLimits = ["10", "28", "30"];
-    const safeLimit = allowedLimits.includes(String(limit)) ? String(limit) : "30";
+    const params = new URLSearchParams();
+    params.set("Category", category);
+    if (subcategory) params.set("Subcategory", subcategory);
+    if (keyword) params.set("Keyword", keyword);
 
-    // Category=11 = Accessories (2 to bylo "Collectibles" - stad blad 400)
-    let url =
-      "https://catalog.roblox.com/v1/search/items/details?Category=11&SortType=0&Limit=" +
-      safeLimit;
+    // CreatorType i CreatorTargetId muszą iść razem
+    if (creatorId && creatorType) {
+      params.set("CreatorTargetId", creatorId);
+      params.set("CreatorType", creatorType); // 1 lub 2 (byte)
+    }
 
-    if (keyword) {
-      url += "&Keyword=" + encodeURIComponent(keyword);
-    }
-    if (creatorId && creatorId !== "0") {
-      // Roblox oczekuje tekstu "User"/"Group", nie liczby
-      const creatorTypeStr = String(creatorType) === "1" ? "User" : "Group";
-      url +=
-        "&CreatorTargetId=" +
-        encodeURIComponent(creatorId) +
-        "&CreatorType=" +
-        creatorTypeStr;
-    }
+    const safeLimit = VALID_LIMITS.has(Number(limit)) ? limit : "30";
+    params.set("Limit", safeLimit);
+    params.set("SortType", sortType);
+
+    const url = `https://catalog.roblox.com/v1/search/items/details?${params.toString()}`;
 
     const response = await fetch(url, {
-      headers: { "User-Agent": "Mozilla/5.0 (ContrabandCatalogProxy)" },
+      headers: {
+        "User-Agent": "Mozilla/5.0 (compatible; ContrabandCatalogProxy/1.0)",
+        Accept: "application/json",
+      },
     });
 
+    const rawText = await response.text();
+
     if (!response.ok) {
+      console.error(`Roblox catalog zwrocil ${response.status}: ${rawText.slice(0, 300)}`);
       return res.status(response.status).json({
-        error: "Katalog Roblox odpowiedzial kodem " + response.status,
+        error: `Katalog Roblox odpowiedzial kodem ${response.status}`,
+        requestedUrl: url,
+        details: rawText.slice(0, 300),
       });
     }
 
-    const data = await response.json();
+    let data;
+    try {
+      data = JSON.parse(rawText);
+    } catch (parseErr) {
+      return res.status(502).json({
+        error: "Nie udalo sie sparsowac odpowiedzi z katalogu Roblox",
+        details: rawText.slice(0, 300),
+      });
+    }
 
-    // Upraszczamy odpowiedź do tego, czego potrzebuje gra
-    const items = (data.data || []).map((entry) => ({
-      name: entry.name,
-      assetId: entry.id,
-      assetType: entry.assetType,
-      price: entry.price ?? entry.lowestPrice ?? 0,
+    const items = (data.data || []).map((it) => ({
+      name: it.name,
+      assetId: it.id,
+      price: it.price ?? 0,
+      priceStatus: it.priceStatus ?? null,
+      creatorName: it.creatorName,
+      itemType: it.itemType,
     }));
 
-    res.json({ items });
+    res.json({
+      items,
+      nextPageCursor: data.nextPageCursor || null,
+    });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.error("Blad serwera proxy:", err);
+    res.status(500).json({ error: "Blad serwera proxy", details: err.message });
   }
 });
 
-app.get("/", (req, res) => {
-  res.send("Contraband catalog proxy dziala. Uzyj /catalog?keyword=... lub /catalog?creatorId=...");
+app.get("/", (_req, res) => {
+  res.send("Contraband Catalog Proxy dziala. Sprawdz /catalog?keyword=cat%20ears");
 });
 
 app.listen(PORT, () => {
