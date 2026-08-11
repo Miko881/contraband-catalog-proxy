@@ -6,6 +6,17 @@ const express = require("express");
 const app = express();
 const PORT = process.env.PORT || 10000;
 
+// Prosty cache w pamięci — te same zapytania (np. wielu graczy klika tę samą
+// kategorię, albo scroll odpala kilka razy pod rząd) nie lecą do Roblox ponownie.
+const cache = new Map();
+const CACHE_TTL_MS = 30000; // 30s
+function cleanupCache() {
+  const now = Date.now();
+  for (const [key, entry] of cache) {
+    if (now - entry.timestamp > CACHE_TTL_MS) cache.delete(key);
+  }
+}
+
 // Dozwolone wartości wg oficjalnej dokumentacji Roblox
 // https://create.roblox.com/docs/projects/assets/api
 const VALID_LIMITS = new Set([10, 28, 30]);
@@ -43,6 +54,12 @@ app.get("/catalog", async (req, res) => {
     params.set("Limit", safeLimit);
     params.set("SortType", sortType);
 
+    const cacheKey = params.toString();
+    const cached = cache.get(cacheKey);
+    if (cached && Date.now() - cached.timestamp < CACHE_TTL_MS) {
+      return res.json(cached.payload);
+    }
+
     const url = `https://catalog.roblox.com/v1/search/items/details?${params.toString()}`;
 
     const response = await fetch(url, {
@@ -51,6 +68,15 @@ app.get("/catalog", async (req, res) => {
         Accept: "application/json",
       },
     });
+
+    if (response.status === 429) {
+      const retryAfterHeader = response.headers.get("retry-after");
+      const retryAfter = retryAfterHeader ? Number(retryAfterHeader) : 5;
+      return res.status(429).json({
+        error: "Zbyt wiele zapytan do katalogu Roblox (429) — poczekaj chwile",
+        retryAfter,
+      });
+    }
 
     const rawText = await response.text();
 
@@ -86,6 +112,12 @@ app.get("/catalog", async (req, res) => {
       items,
       nextPageCursor: data.nextPageCursor || null,
     });
+
+    cache.set(cacheKey, {
+      timestamp: Date.now(),
+      payload: { items, nextPageCursor: data.nextPageCursor || null },
+    });
+    if (cache.size > 200) cleanupCache();
   } catch (err) {
     console.error("Blad serwera proxy:", err);
     res.status(500).json({ error: "Blad serwera proxy", details: err.message });
